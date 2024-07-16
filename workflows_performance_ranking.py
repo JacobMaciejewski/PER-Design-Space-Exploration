@@ -22,7 +22,6 @@ def get_method_csv_files_for_directory(method : str, directory_path: str) -> lis
     return sorted([os.path.join(directory_path, file_name) for file_name in file_names if (valid_file(file_name) and method in file_name)])
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--experiments_path', type=str, required=True,
                         help='Path should include the workflow results per dataset file')
@@ -31,7 +30,7 @@ if __name__ == "__main__":
     parser.add_argument('--calculate_distance', type=str, nargs='+', default=['True', 'False'],
                         help='Calculate Distances')
     args = parser.parse_args()
-    
+
     # map string representation of true/false into boolean
     calculate_distances = [option.lower() == 'true' for option in args.calculate_distance]
 
@@ -42,8 +41,7 @@ if __name__ == "__main__":
 
     total_files = len(worfklow_types) * len(args.features) * len(args.calculate_distance)
     current_file = 0
-    print(args.experiments_path)
-    
+
     for worfklow_type in worfklow_types:
         attributes = get_attributes(worfklow_type)
         for feature in args.features:
