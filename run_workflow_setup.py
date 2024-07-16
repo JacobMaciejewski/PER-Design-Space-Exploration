@@ -103,12 +103,9 @@ if __name__ == "__main__":
     
     # path to the configuration file
     CONFIG_FILE_PATH = to_path(args.config_path)
-    print(f"Config File Path: {CONFIG_FILE_PATH}")
     # path to the folder where the setup results will be stored
     STORE_FOLDER_PATH = to_path(args.store_folder_path)
-    print(f"Store Folder Path: {STORE_FOLDER_PATH}")
     STORE_FILE_PATH = STORE_FOLDER_PATH + os.path.splitext(os.path.basename(CONFIG_FILE_PATH))[0]
-    print(f"Store File Path: {STORE_FILE_PATH}")
     # path of the configuration file
     # CONFIG_FILE_PATH = to_path('~/best_nns/pyJedAI-Dev/script-configs/' + args.config_name + '.json')
     # which configuration from the json file should be used in current experiment  
