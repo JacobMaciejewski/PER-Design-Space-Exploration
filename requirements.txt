@@ -1,0 +1,6 @@
+pyjedai
+datasets
+optuna
+fasttext
+torchtext
+sparkly

@@ -1,3 +1,17 @@
+import os
+import pandas as pd
+from time import time
+import json
+import sys
+sys.path.append('.')
+from pyspark.sql import SparkSession
+import pyspark.sql.functions as F
+from pyspark.sql.functions import col
+from sparkly.index import IndexConfig, LuceneIndex
+from sparkly.search import Searcher
+from pathlib import Path
+
+
 import time
 import os
 import sys
@@ -8,35 +22,83 @@ import argparse
 import warnings
 from itertools import product
 from collections import defaultdict
-from utilities.deepblocker.gridsearch_utils import (
+from utilities.sparkly.gridsearch_utils import (
     to_path,
     values_given,
     get_multiples,
     necessary_dfs_supplied,
     clear_json_file,
     purge_id_column,
-    get_deepblocker_candidates,
+    # get_deepblocker_candidates,
     update_workflow_statistics,
     gt_to_df,
     iteration_normalized,
     get_valid_indexings,
-    get_candidates_based_on_indexing,
-    check_fasttext_dependencies
+    get_candidates_based_on_indexing
     )
 
-if __name__ == "__main__":
+def run_sparkly(index, query, gt, sep, cid, tid, limit, dataset):
+    # path to the test data
+    # data_path = Path('./examples/data/abt_buy/').absolute()
+    # # table to be indexed
+    # table_a_path = data_path / 'table_a.csv'
+    # # table for searching
+    # table_b_path = data_path / 'table_b.csv'
+    # # the ground truth
+    # gold_path = data_path / 'gold.csv'
+    # the analyzers used to convert the text into tokens for indexing
+    analyzers = ['3gram']
+    
+    # initialize a local spark context
+    spark = SparkSession.builder\
+                        .master('local[*]')\
+                        .appName('Sparkly Example')\
+                        .getOrCreate()
+    # read all the data as spark dataframes with tab as the separator
+    sep = sep.replace("\\", "") 
+    table_a = spark.read.csv(index, header=True, inferSchema=True, sep=sep)
+    table_a = table_a.withColumnRenamed(cid, "_id")
+    table_b = spark.read.csv(query, header=True, inferSchema=True, sep=sep)
+    table_b = table_b.withColumnRenamed(cid, "_id")
+    cid = "_id"
+    gold = spark.read.csv(gt, header=True, inferSchema=True, sep=sep)
+    # the index config, '_id' column will be used as the unique 
+    # id column in the index. Note id_col must be an integer (32 or 64 bit)
+    config = IndexConfig(id_col=cid)
+    # add the 'name' column to be indexed with analyzer above
+    config.add_field(tid, analyzers)
+    # create a new index stored at /tmp/example_index/
+    index = LuceneIndex(f'/tmp/example_index_{dataset}/', config)
+    # index the records from table A according to the config we created above
+    index.upsert_docs(table_a)
+    
+    # get a query spec (template) which searches on 
+    # all indexed fields
+    query_spec = index.get_full_query_spec()
+    # create a searcher for doing bulk search using our index
+    searcher = Searcher(index)
+    # search the index with table b
+    candidates = searcher.search(table_b, query_spec, id_col=cid, limit=limit).cache()
+    ids_exploded = candidates.selectExpr("_id", "posexplode_outer(ids) AS (pos, id2)")
+    scores_exploded = candidates.selectExpr("_id", "posexplode_outer(scores) AS (pos, similarity)")
+    # join ID and score exploded DataFrames based on the position index
+    candidates_df = ids_exploded.join(scores_exploded, ["_id", "pos"]).drop("pos")
+    
+    candidates_df = candidates_df.withColumnRenamed("_id", "rtable_id").withColumnRenamed("id2", "ltable_id").toPandas()    
+    candidates.unpersist()   
+    return candidates_df
+    
+data_directory = '/usr/src/sparkly/data/'
+# log_file = '/usr/src/sparkly/logs/Sparkly.txt'
+
+if __name__ == '__main__':
     warnings.filterwarnings("ignore")
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path',
-                        dest='config_path',
+    parser.add_argument('--config_name',
+                        dest='config_name',
                         type=str,
-                        default="./grid_config/deepblocker_experiments_top_1.json",
-                        help='Path to the config file that stores the deepblocker setup to be executed')
-    parser.add_argument('--store_folder_path',
-                        dest='store_folder_path',
-                        type=str,
-                        default="./results/",
-                        help='Path to the folder within which the deepblocker setup results will be stored')
+                        default="deepblocker_experiments_top_1",
+                        help='Name of the configuration from grid_config folder that we want to execute')
     parser.add_argument('--dataset',
                         dest='dataset',
                         type=str,
@@ -44,21 +106,20 @@ if __name__ == "__main__":
                         help='Which dataset should the gridsearch be conducted for')
     args = parser.parse_args()
     
+    
     #-EDIT-START-#
     # parameters native to the Deepblocker Workflow
     # don't edit, unless new parameters were added to the Workflow
+    EXECUTION_PATH = '/usr/src/sparkly/'
     VALID_WORKFLOW_PARAMETERS = ["number_of_nearest_neighbors", "indexing"]
-    
-    
-    # path to the configuration file
-    CONFIG_FILE_PATH = to_path(args.config_path)
-    # path to the folder where the setup results will be stored
-    STORE_FOLDER_PATH = to_path(args.store_folder_path)
-    STORE_FILE_PATH = STORE_FOLDER_PATH + os.path.splitext(os.path.basename(CONFIG_FILE_PATH))[0]
+    # path of the configuration file
+    CONFIG_FILE_PATH = to_path(EXECUTION_PATH + 'grid_config/' + args.config_name + '.json')
+    # which configuration from the json file should be used in current experiment  
+    EXPERIMENT_NAME = args.config_name + '_' + args.dataset
     # path at which the results will be stored within a json file
-    RESULTS_STORE_PATH = to_path(STORE_FILE_PATH + '.csv')
+    RESULTS_STORE_PATH = to_path(EXECUTION_PATH + 'results/' + EXPERIMENT_NAME + '.csv')
     # path at which the top workflows for specified argument values are stored
-    BEST_WORKFLOWS_STORE_PATH = to_path(STORE_FILE_PATH + '_best.json')
+    BEST_WORKFLOWS_STORE_PATH = to_path(RESULTS_STORE_PATH + '_best.json')
     # results should be stored in the predefined path
     STORE_RESULTS = True
     # AUC calculation and ROC visualization after execution
@@ -69,8 +130,6 @@ if __name__ == "__main__":
     D1_ID = 'id'
     D2_ID = 'id'  
     #-EDIT-END-#          
-    
-    check_fasttext_dependencies()
     
     with open(CONFIG_FILE_PATH) as file:
         config = json.load(file)                           
@@ -89,16 +148,12 @@ if __name__ == "__main__":
 
     for id, dataset_info in enumerate(datasets_info):
         dataset_id = id + 1
-        
-        
-        dataset_indexing : str = config['indexing']
-        
-        
         d1_path, d2_path, gt_path = dataset_info
         dataset_name = config['dataset_name'][id] if(values_given(config, 'dataset_name') and len(config['dataset_name']) > id) else ("D" + str(dataset_id))
+        
         sep = config['separator'][id] if values_given(config, 'separator') else '|'
-        d1 : pd.DataFrame = pd.read_csv(to_path(d1_path), sep=sep, engine='python', na_filter=True).astype(str)
-        d2 : pd.DataFrame = pd.read_csv(to_path(d2_path), sep=sep, engine='python', na_filter=True).astype(str)
+        d1 : pd.DataFrame = pd.read_csv(to_path(d1_path), sep=sep, engine='python', na_filter=False).astype(str)
+        d2 : pd.DataFrame = pd.read_csv(to_path(d2_path), sep=sep, engine='python', na_filter=False).astype(str)
         gt : pd.DataFrame = pd.read_csv(to_path(gt_path), sep=sep, engine='python')
         gt.columns = ['ltable_id', 'rtable_id']
         duplicate_of : dict = gt_to_df(ground_truth=gt)
@@ -119,30 +174,39 @@ if __name__ == "__main__":
             workflow_statistics['dataset'] = dataset_name
             workflow_statistics['indexing'] = workflow_arguments['indexing']
             valid_indexings : list = get_valid_indexings(indexing=workflow_statistics['indexing'])
-                                
+                    
             for iteration in range(iterations):
                 execution_count += 1
                 print(f"#### WORKFLOW {execution_count}/{total_workflows} ####")
                 start_time = time.time()
                 
+                ground = 'file://{}'.format(gt_path)
+                query = 'file://{}'.format(d2_path)
+                index = 'file://{}'.format(d1_path)
+                cid, tid = 'id', 'aggregate value'
                 inorder_candidates : pd.DataFrame = None
                 reverse_candidates : pd.DataFrame = None
+                
                 for indexing in valid_indexings:
                     if(indexing == "inorder"):
-                        inorder_candidates : pd.DataFrame = get_deepblocker_candidates(source_dataset=d1,
-                                                                                       target_dataset=d2,
-                                                                                       nearest_neighbors=workflow_arguments['number_of_nearest_neighbors'])
+                        inorder_candidates : pd.DataFrame = run_sparkly(index=index, query=query,
+                                                            gt=ground, sep=sep,
+                                                            cid=cid, tid=tid, 
+                                                            limit=workflow_arguments['number_of_nearest_neighbors'],
+                                                            dataset=args.dataset)
                     if(indexing == "reverse"):
-                        reverse_candidates : pd.DataFrame = get_deepblocker_candidates(source_dataset=d2,
-                                                                                       target_dataset=d1,
-                                                                                       nearest_neighbors=workflow_arguments['number_of_nearest_neighbors'])
+                        reverse_candidates : pd.DataFrame = run_sparkly(index=query, query=index,
+                                                            gt=ground, sep=sep,
+                                                            cid=cid, tid=tid, 
+                                                            limit=workflow_arguments['number_of_nearest_neighbors'],
+                                                            dataset=args.dataset)
                         reverse_candidates['ltable_id'], reverse_candidates['rtable_id'] = reverse_candidates['rtable_id'], reverse_candidates['ltable_id']
                         
                 
                 candidates : pd.DataFrame = get_candidates_based_on_indexing(indexing=workflow_statistics['indexing'],
                                                                              inorder_candidates=inorder_candidates,
                                                                              reverse_candidates=reverse_candidates)
-                
+            
                 update_workflow_statistics(statistics=workflow_statistics,
                                            candidates=candidates,
                                            ground_truth=gt,
@@ -155,7 +219,6 @@ if __name__ == "__main__":
 
             workflow_statistics = pd.DataFrame(workflow_statistics)
             workflow_statistics.reset_index(inplace=True, drop=True)
-            workflows_dataframe = pd.concat([workflows_dataframe, pd.DataFrame(workflow_statistics)], axis=0, ignore_index=True)
-               
+            workflows_dataframe = pd.concat([workflows_dataframe, pd.DataFrame(workflow_statistics)], axis=0, ignore_index=True)  
             if(STORE_RESULTS):
                 workflows_dataframe.to_csv(RESULTS_STORE_PATH, index=False)
