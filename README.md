@@ -1,1 +1,1 @@
-# Progressive-ER-A-Design-Space-Exploration
+# Progressive Entity Resolution - A Design Space Exploration
